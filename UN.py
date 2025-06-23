@@ -4,14 +4,15 @@ import json
 import requests
 import base64
 
+# --- Streamlit Page Setup ---
 st.set_page_config(page_title="UN Sanctions Tracker", layout="wide")
 st.title("🛡️ UN Sanctions Change Tracker (GitHub Integrated)")
 
-# --- Load GitHub Secrets ---
+# --- Load Secrets ---
 GITHUB_USERNAME = st.secrets["GITHUB_USERNAME"]
 GITHUB_REPO = st.secrets["GITHUB_REPO"]
-GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
 GITHUB_BRANCH = st.secrets["GITHUB_BRANCH"]
+GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
 SNAPSHOT_FILE_PATH = st.secrets["SNAPSHOT_FILE_PATH"]
 
 HEADERS = {
@@ -20,6 +21,7 @@ HEADERS = {
 }
 
 # --- GitHub API Helpers ---
+
 def get_snapshot_from_github():
     url = f"https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPO}/contents/{SNAPSHOT_FILE_PATH}?ref={GITHUB_BRANCH}"
     response = requests.get(url, headers=HEADERS)
@@ -37,13 +39,29 @@ def upload_snapshot_to_github(snapshot_json, sha=None):
         "content": content_encoded,
         "branch": GITHUB_BRANCH
     }
+
     if sha:
-        data["sha"] = sha
+        data["sha"] = sha  # Include only if file exists
 
     response = requests.put(url, headers=HEADERS, data=json.dumps(data))
-    return response.status_code == 201 or response.status_code == 200
+
+    if response.status_code in [200, 201]:
+        return True
+    else:
+        st.error(f"❌ GitHub upload failed. Status Code: {response.status_code}")
+        try:
+            error_json = response.json()
+            message = error_json.get("message", "Unknown error")
+            errors = error_json.get("errors", [])
+            st.code(f"Message: {message}")
+            if errors:
+                st.code(f"Details: {json.dumps(errors, indent=2)}")
+        except:
+            st.code(f"Raw Response: {response.text}")
+        return False
 
 # --- XML Parser ---
+
 def parse_consolidated_xml(uploaded_file):
     tree = ET.parse(uploaded_file)
     root = tree.getroot()
@@ -55,7 +73,7 @@ def parse_consolidated_xml(uploaded_file):
     for person in individuals_root.findall("INDIVIDUAL"):
         ref = person.findtext("REFERENCE_NUMBER") or "UNKNOWN_REF"
 
-        # Extract all *_NAME fields dynamically
+        # Collect *_NAME tags dynamically
         name_parts = []
         for child in person:
             if child.tag.endswith("_NAME") and child.tag != "ALIAS_NAME":
@@ -63,6 +81,7 @@ def parse_consolidated_xml(uploaded_file):
                 name_parts.append(value)
         full_name = " ".join(name_parts).strip()
 
+        # Collect aliases
         aliases = []
         for alias in person.findall("INDIVIDUAL_ALIAS"):
             alias_name = alias.findtext("ALIAS_NAME")
@@ -79,6 +98,7 @@ def parse_consolidated_xml(uploaded_file):
     return entries
 
 # --- Comparison Logic ---
+
 def compare_snapshots(old_entries, new_entries):
     old_map = {e['reference_number']: e for e in old_entries}
     new_map = {e['reference_number']: e for e in new_entries}
@@ -91,12 +111,14 @@ def compare_snapshots(old_entries, new_entries):
     ]
     return added, removed, modified
 
-# --- UI ---
-uploaded_file = st.file_uploader("📤 Upload today's consolidated.xml", type="xml")
+# --- Streamlit UI ---
+
+uploaded_file = st.file_uploader("📤 Upload today's consolidated.xml file", type="xml")
 
 if uploaded_file:
+    st.success("✅ File uploaded. Parsing...")
     current_entries = parse_consolidated_xml(uploaded_file)
-    st.success(f"✅ Parsed {len(current_entries)} entries.")
+    st.info(f"📄 {len(current_entries)} entries parsed from today's file.")
 
     old_entries, old_sha = get_snapshot_from_github()
 
@@ -121,12 +143,14 @@ if uploaded_file:
             for m in modified:
                 st.write(f"Reference #: {m['reference_number']}")
                 st.json({"Old": m["old"], "New": m["new"]})
-    else:
-        st.warning("⚠️ No previous snapshot found. Saving current version as baseline.")
 
-    # Save current snapshot back to GitHub
+    else:
+        st.warning("⚠️ No previous snapshot found. Saving this as the baseline.")
+
     success = upload_snapshot_to_github(current_entries, sha=old_sha)
     if success:
         st.success("📤 Snapshot successfully updated to GitHub.")
     else:
-        st.error("❌ Failed to update snapshot on GitHub.")
+        st.warning("⚠️ Snapshot NOT saved to GitHub. See debug info above.")
+else:
+    st.info("Upload the UN sanctions `consolidated.xml` file to begin.")
